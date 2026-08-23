@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Портал управления AI-инициативами</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- Employee selection screen -->
+<section id="role-screen" class="screen">
+  <div class="role-box">
+    <h1>Портал AI-инициатив</h1>
+    <p class="muted">Выберите себя из списка сотрудников, чтобы войти</p>
+    <div class="field">
+      <label>Сотрудник</label>
+      <select id="employee-select"></select>
+    </div>
+    <button class="primary-btn" id="employee-continue" style="width:100%; margin-top:10px;">Войти</button>
+    <p id="role-error" class="muted"></p>
+  </div>
+</section>
+
+<!-- Main application -->
+<section id="app-screen" class="screen hidden">
+  <header class="app-header">
+    <div class="brand">Портал AI-инициатив</div>
+    <nav id="tabs" class="tabs"></nav>
+    <div class="header-actions">
+      <button id="notif-btn" class="icon-btn">🔔<span id="notif-badge" class="badge hidden">0</span></button>
+      <div class="who">
+        <span id="who-name"></span>
+        <span id="who-role" class="muted"></span>
+      </div>
+      <button id="logout-btn" class="secondary-btn">Сменить пользователя</button>
+    </div>
+  </header>
+
+  <main id="content" class="content"></main>
+</section>
+
+<!-- Notifications panel -->
+<aside id="notif-panel" class="notif-panel hidden">
+  <div class="notif-panel-header">
+    <strong>Уведомления</strong>
+    <button id="notif-close" class="link-btn">✕</button>
+  </div>
+  <div id="notif-list" class="notif-list"></div>
+</aside>
+
+<!-- Generic modal -->
+<div id="modal-backdrop" class="modal-backdrop hidden">
+  <div id="modal" class="modal"></div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="script.js"></script>
+</body>
+</html>

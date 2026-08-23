@@ -1,0 +1,20 @@
+services:
+  backend:
+    build: ./backend
+    container_name: ai_portal_v2_backend
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    container_name: ai_portal_v2_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
