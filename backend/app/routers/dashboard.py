@@ -44,34 +44,46 @@ def dashboard_head(
 @router.get("/dashboard/top")
 def dashboard_top(db: Session = Depends(get_db)):
     initiatives = _base_query(db).all()
+    approved_initiatives = [ini for ini in initiatives if ini.is_approved]
 
     total = len(initiatives)
-    approved_count = sum(1 for i in initiatives if i.is_approved)
+    approved_count = len(approved_initiatives)
     pending_count = total - approved_count
 
+    # All money/resource/payback figures below are scoped to approved
+    # initiatives only — a proposal that's still pending, in revision, or
+    # rejected isn't committed spend and shouldn't count toward the portfolio's
+    # actual cost, benefit or payback economics.
     resources_planned = _sum_by_resource(
         (entry.resource, entry.quantity)
-        for ini in initiatives
+        for ini in approved_initiatives
         for entry in ini.resource_entries
         if entry.is_planned
     )
     benefits_total = _sum_by_resource(
-        (b.resource, b.quantity) for ini in initiatives for b in ini.benefits
+        (b.resource, b.quantity) for ini in approved_initiatives for b in ini.benefits
     )
 
-    by_department = defaultdict(lambda: {
-        "initiatives_count": 0, "approved_count": 0, "pending_count": 0,
-        "planned_cost_money": 0.0, "fact_cost_money": 0.0, "benefit_money": 0.0,
-        "payback_months_sum": 0.0,
-    })
+    # Status counts per department come from the whole portfolio (this is what
+    # feeds the "согласовано / не согласовано" chart), independent of the
+    # approved-only money aggregation below.
+    dept_counts = defaultdict(lambda: {"initiatives_count": 0, "approved_count": 0, "pending_count": 0})
     for ini in initiatives:
         dept_name = ini.department.name if ini.department else "—"
-        agg = by_department[dept_name]
+        agg = dept_counts[dept_name]
         agg["initiatives_count"] += 1
         if ini.is_approved:
             agg["approved_count"] += 1
         else:
             agg["pending_count"] += 1
+
+    dept_money = defaultdict(lambda: {
+        "planned_cost_money": 0.0, "fact_cost_money": 0.0, "benefit_money": 0.0,
+        "payback_months_sum": 0.0,
+    })
+    for ini in approved_initiatives:
+        dept_name = ini.department.name if ini.department else "—"
+        agg = dept_money[dept_name]
         # Money values: quantity × the resource's configured rate (₽ per unit),
         # set by PM in "Ресурсы и ставки". A resource with no rate set contributes 0.
         ini_planned_cost = sum(
@@ -87,11 +99,16 @@ def dashboard_top(db: Session = Depends(get_db)):
         agg["planned_cost_money"] += ini_planned_cost
         agg["fact_cost_money"] += ini_fact_cost
         agg["benefit_money"] += ini_benefit
-        # Department payback = sum of each initiative's own payback period.
-        # Initiatives with no monthly benefit have no payback period to add.
+        # Department payback = sum of each approved initiative's own payback
+        # period. Initiatives with no monthly benefit have no payback period to add.
         if ini_benefit > 0:
             agg["payback_months_sum"] += ini_planned_cost / ini_benefit
-    by_department_list = [{"department": k, **v} for k, v in by_department.items()]
+
+    empty_money = {"planned_cost_money": 0.0, "fact_cost_money": 0.0, "benefit_money": 0.0, "payback_months_sum": 0.0}
+    by_department_list = [
+        {"department": name, **counts, **dept_money.get(name, empty_money)}
+        for name, counts in dept_counts.items()
+    ]
     by_department_list.sort(key=lambda x: x["initiatives_count"], reverse=True)
 
     return {
@@ -100,7 +117,8 @@ def dashboard_top(db: Session = Depends(get_db)):
         "pending_count": pending_count,
         "total_planned_cost_money": sum(d["planned_cost_money"] for d in by_department_list),
         "total_fact_cost_money": sum(d["fact_cost_money"] for d in by_department_list),
-        # Portfolio payback = sum of every initiative's own payback period,
+        "total_benefit_money": sum(d["benefit_money"] for d in by_department_list),
+        # Portfolio payback = sum of every approved initiative's own payback period,
         # same method as the per-department figures (which this is a sum of).
         "total_payback_months": sum(d["payback_months_sum"] for d in by_department_list),
         "resources_planned": resources_planned,

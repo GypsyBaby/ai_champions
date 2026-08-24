@@ -8,12 +8,32 @@ const ROLE_LABELS = {
   head: "Руководитель подразделения",
   pm: "PM",
   top: "Топ-менеджмент",
+  teamlead: "TeamLead",
+};
+
+// TeamLead's role label alone doesn't say which specialization they lead —
+// append it (e.g. "TeamLead, ML-инженер") whenever it's known.
+function roleLabel(role, specialization) {
+  const label = ROLE_LABELS[role] || role;
+  return role === "teamlead" && specialization ? `${label}, ${specialization}` : label;
+}
+
+// Mirrors backend/app/routers/reports.py STATUS_LABELS — must match the
+// server's precedence exactly, since it's used as a filter value there.
+const REPORT_STATUS_LABELS = {
+  approved: "Согласовано",
+  revision: "На пересмотре",
+  rejected: "Отклонено",
+  pending_head: "Ожидает согласования руководителя",
+  pending_teamlead: "Ожидает согласования TeamLead",
+  pending_top: "Ожидает согласования топ-менеджмента",
 };
 
 const state = {
   employeeId: null,
   fullName: null,
   role: null,
+  specialization: null,
   departmentId: null,
   departmentName: null,
   currentTab: null,
@@ -55,6 +75,76 @@ async function api(path, { method = "GET", body, params } = {}) {
   return res.json();
 }
 
+/**
+ * GETs a binary file (Excel report) with the session's auth header — a plain
+ * <a href> can't carry X-Employee-ID, so this fetches it as a blob and
+ * triggers the save via a temporary object URL.
+ */
+async function downloadFile(path, params, fallbackFilename) {
+  let url = API_BASE + path;
+  if (params) {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, v);
+    });
+    const s = qs.toString();
+    if (s) url += "?" + s;
+  }
+  const headers = {};
+  if (state.employeeId) headers["X-Employee-ID"] = state.employeeId;
+
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const errBody = await res.json();
+      detail = errBody.detail || detail;
+    } catch (e) {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const filename = match ? match[1] : fallbackFilename || "download";
+
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
+/**
+ * POSTs a file as multipart/form-data with the session's auth header.
+ */
+async function uploadFile(path, file) {
+  const url = API_BASE + path;
+  const headers = {};
+  if (state.employeeId) headers["X-Employee-ID"] = state.employeeId;
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(url, { method: "POST", headers, body: formData });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const errBody = await res.json();
+      detail = errBody.detail || detail;
+    } catch (e) {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 /* ===================== Small utilities ===================== */
 
 function el(html) {
@@ -87,6 +177,13 @@ function fmtDateTime(d) {
 function fmtNum(n) {
   if (n === null || n === undefined) return "0";
   return Number(n).toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+}
+
+function fmtFileSize(bytes) {
+  if (bytes === null || bytes === undefined) return "—";
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
 function pluralDays(n) {
@@ -136,6 +233,217 @@ document.getElementById("modal-backdrop").addEventListener("click", (e) => {
   if (e.target.id === "modal-backdrop") closeModal();
 });
 
+/* ===================== About the product ===================== */
+// Mirrors PRODUCT_OVERVIEW.md — keep the two in sync when either changes.
+
+const ABOUT_PRODUCT_HTML = `
+  <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+    <h2 style="margin-top:0;">Портал управления портфелем AI-инициатив</h2>
+    <button class="link-btn" onclick="closeModal()">✕</button>
+  </div>
+  <p>Внутренний портал для ведения портфеля AI-инициатив компании: заявка инициативы AI-чемпионом,
+  её многоступенчатое согласование, учёт плановых и фактических ресурсов, портфельная аналитика и
+  отчётность.</p>
+
+  <h3>1. Роли и права</h3>
+  <p class="muted">Входа по паролю нет: на стартовом экране выбирается сотрудник из списка, дальше все
+  действия выполняются от его имени. Всего пять ролей.</p>
+
+  <h4>AI-чемпион</h4>
+  <ul>
+    <li>Создаёт инициативы: название, описание, даты начала/окончания, плановые ресурсы (человеческие
+      и технические) и ожидаемую выгоду.</li>
+    <li>Видит и редактирует <strong>только свои</strong> инициативы (вкладка «Мои инициативы»).</li>
+    <li>Логирует фактически потраченное время по каждой специализации — фактические часы не могут
+      превышать плановые (ограничение проверяется и на клиенте, и на сервере).</li>
+    <li>Оставляет комментарии, прикрепляет и скачивает файлы к карточке инициативы.</li>
+    <li>Раздел «Отчёты» — выгрузка в Excel/CSV, но только по своим инициативам.</li>
+    <li>Раз в неделю получает в «Уведомлениях» напоминание залогировать время по инициативам (см. раздел 5).</li>
+    <li>Не может согласовывать/отклонять инициативы.</li>
+  </ul>
+
+  <h4>Руководитель подразделения</h4>
+  <ul>
+    <li>Видит инициативы только тех AI-чемпионов, что относятся к его подразделению.</li>
+    <li>Первый этап цепочки согласования: «Требуют согласования» / «Согласованные» (см. раздел 2).</li>
+    <li>Раздел «Отчёты» — только по инициативам своего подразделения.</li>
+    <li>Комментарии и файлы — как у любого пользователя.</li>
+  </ul>
+
+  <h4>TeamLead</h4>
+  <ul>
+    <li>Роль привязана к одной специализации человеческих ресурсов (ML-инженер, Аналитик, Разработчик,
+      СисАдмин, Тестировщик — набор расширяемый, каждая специализация заводится PM в «Ресурсы и
+      ставки» вместе с обязательным TeamLead-ом). Специализация показывается рядом с ролью везде, где
+      отображается пользователь: «TeamLead, ML-инженер».</li>
+    <li>Второй этап цепочки: видит инициативу только после согласования руководителем и только если её
+      специализация упомянута в блоке «Человеко-часы» или «Ожидаемая выгода» карточки.</li>
+    <li>Интерфейс идентичен интерфейсу руководителя — те же две вкладки «Требуют согласования» /
+      «Согласованные».</li>
+    <li>Доступа к «Отчётам» и «Портфелю» не имеет.</li>
+  </ul>
+
+  <h4>PM</h4>
+  <ul>
+    <li>Видит <strong>все</strong> инициативы портала («Все инициативы») с фильтрами по подразделению,
+      чемпиону и статусу согласования.</li>
+    <li>Единственная роль, управляющая справочниками:
+      <ul>
+        <li>«Ресурсы и ставки» — стоимость ресурса (₽/ед.), создание новых специализаций человеческих
+          ресурсов (обязательно с назначением TeamLead-а), назначение/смена TeamLead-а у существующей
+          специализации.</li>
+        <li>«Штат» — подразделения и сотрудники (создание, назначение ролей и подразделений).</li>
+      </ul>
+    </li>
+    <li>«Портфель» — та же дашборд-аналитика, что и у топ-менеджмента (см. раздел 4).</li>
+    <li>«Отчёты» — по всем инициативам, с фильтром по подразделению.</li>
+    <li>Может удалить любую инициативу. Сам не участвует в согласовании.</li>
+  </ul>
+
+  <h4>Топ-менеджмент</h4>
+  <ul>
+    <li>Финальный, четвёртый этап цепочки согласования: вкладка «Требуют согласования» — сюда попадают
+      инициативы, дошедшие до этой стадии по всем подразделениям сразу.</li>
+    <li>«Портфель» — портфельная аналитика.</li>
+    <li>«Все инициативы» — просмотр всего портфеля без права редактирования/согласования вне вкладки
+      «Требуют согласования».</li>
+    <li>«Отчёты» — по всем инициативам, с фильтром по подразделению.</li>
+  </ul>
+
+  <h3>2. Цепочка согласования инициатив</h3>
+  <p>Инициатива проходит <strong>до четырёх последовательных этапов</strong>. Текущий этап хранится в
+  поле <code>approval_stage</code> (<code>head</code> → <code>teamlead</code> → <code>top</code>), а
+  «полностью согласовано» — это отдельный флаг <code>is_approved</code>, который становится
+  <code>True</code> только после решения топ-менеджмента.</p>
+
+  <pre style="overflow-x:auto; font-size:0.78em; line-height:1.4; background:#f8f9fb; border:1px solid var(--border); border-radius:8px; padding:12px;">Чемпион создаёт инициативу
+        │
+        ▼
+ ┌─────────────┐   отклонить/на пересмотр   (остаётся у руководителя,
+ │ Руководитель │ ─────────────────────────►  ждёт исправлений от чемпиона)
+ │ подразделения│
+ └──────┬──────┘
+        │ согласовать
+        ▼
+   есть ли специализации с TeamLead-ом
+   в «Человеко-часы» или «Ожидаемая выгода»?
+        │                              │
+       нет                            да
+        │                              ▼
+        │                    ┌──────────────────┐   отклонить/на пересмотр
+        │                    │  Все нужные       │ ──────────────────────►  (останавливает круг,
+        │                    │  TeamLead-ы       │                           чемпион должен
+        │                    │  (параллельно)    │                           исправить и переслать)
+        │                    └────────┬──────────┘
+        │                             │ согласовали ВСЕ
+        ▼                             ▼
+ ┌─────────────┐
+ │Топ-менеджмент│   отклонить/на пересмотр  (остаётся у топ-менеджмента,
+ │              │ ─────────────────────────►  ждёт исправлений)
+ └──────┬──────┘
+        │ согласовать
+        ▼
+   is_approved = True → «Согласовано»</pre>
+
+  <p><strong>Детали:</strong></p>
+  <ul>
+    <li><strong>Кто требуется на этапе TeamLead.</strong> Собирается объединённое множество
+      TeamLead-ов всех специализаций человеческих ресурсов, встречающихся либо в плановых ресурсах
+      («Человеко-часы»), либо в ожидаемой выгоде («Ожидаемая выгода») — попадание в любой из двух
+      блоков добавляет TeamLead-а этой специализации в цепочку. Если таких специализаций нет вовсе,
+      этап TeamLead пропускается — инициатива сразу уходит топ-менеджменту.</li>
+    <li><strong>Согласование TeamLead-ами идёт параллельно, не последовательно.</strong> Каждый
+      TeamLead решает независимо; когда согласовали все — инициатива автоматически переходит к
+      топ-менеджменту. Пока решили не все, в карточке видно, кто уже согласовал и кого ещё ждут.</li>
+    <li><strong>Отклонение/пересмотр одним TeamLead-ом останавливает круг</strong>, но не «обнуляет»
+      уже принятые решения других TeamLead-ов — они по-прежнему видят инициативу в своих
+      «Согласованные». Дальше требуется правка чемпиона (см. раздел 3) — это запускает цепочку заново
+      с руководителя.</li>
+    <li><strong>Отклонённая/возвращённая на пересмотр инициатива остаётся в очереди того же этапа</strong>
+      — тот же руководитель или тот же топ-менеджмент увидит её в «Требуют согласования» снова (только
+      правка чемпиона запускает новый круг).</li>
+    <li><strong>История согласований</strong> в карточке инициативы хранит все решения (кто, когда,
+      какая роль — включая специализацию TeamLead-а, — и итог) в хронологическом порядке.</li>
+  </ul>
+
+  <h3>3. Изменение ресурсов и повторное согласование</h3>
+  <p>Карточку инициативы редактирует только её чемпион. Что происходит при сохранении правок, зависит
+  от того, что именно изменилось:</p>
+  <ul>
+    <li><strong>Название, описание, даты начала/окончания</strong> — сохраняются свободно, без
+      каких-либо последствий для статуса согласования. Руководитель лишь получает уведомление, что
+      инициатива была изменена.</li>
+    <li><strong>Плановые ресурсы («Человеко-часы», «Плановые технические ресурсы») или «Ожидаемая
+      выгода»</strong> — любое изменение количества/состава запускает полный сброс цепочки:
+      <ol>
+        <li>Инициатива уходит на пересогласование <strong>с самого начала</strong>, независимо от
+          того, на каком этапе она была (даже если уже согласовали все TeamLead-ы или дело было за
+          топ-менеджментом).</li>
+        <li>Все текущие решения TeamLead-ов по этой инициативе (и «pending», и уже «approved»)
+          удаляются — раз состав специализаций мог измениться, прежние согласования могли устареть и
+          относиться к ресурсам, которых уже нет.</li>
+        <li>В историю согласований добавляется запись «отправлено на пересмотр чемпионом» с точным
+          построчным перечнем, что изменилось.</li>
+        <li>Руководителю подразделения приходит уведомление, что инициатива требует повторного
+          рассмотрения.</li>
+      </ol>
+    </li>
+    <li><strong>Почему именно так.</strong> Изменение специализаций и объёмов напрямую влияет на то,
+      кто вообще должен согласовывать инициативу и на экономику проекта — поэтому в отличие от
+      отклонения одним TeamLead-ом (которое не трогает чужие решения), правка ресурсов чемпионом
+      обнуляет вообще всё и требует прохождения всей цепочки заново.</li>
+    <li><strong>Фактические часы не могут превышать плановые.</strong> При логировании фактических
+      часов по специализации сервер не даст записать больше, чем осталось от планового значения.
+      Проверка дублируется на клиенте для мгновенной обратной связи, но источник истины — сервер.</li>
+  </ul>
+
+  <h3>4. Функционал «Портфель»</h3>
+  <p>Доступен PM и топ-менеджменту (полностью одинаковый для обеих ролей — один и тот же экран).</p>
+  <ul>
+    <li><strong>Счётчики портфеля</strong> («Инициатив в портфеле», «Согласовано», «Не согласовано»)
+      считаются по <strong>всему</strong> портфелю независимо от статуса.</li>
+    <li><strong>Все денежные и ресурсные показатели считаются только по инициативам в статусе
+      «Согласовано»</strong>: плановые/фактические затраты, ожидаемая выгода, окупаемость. Инициатива,
+      которая ещё не прошла все этапы (или отклонена/на пересмотре), не считается зафиксированным
+      расходом или выгодой портфеля.</li>
+    <li><strong>«Общая ожидаемая выгода портфеля (экономия в месяц)»</strong> — одно число вверху
+      экрана: сумма денежной выгоды (₽/мес.) всех согласованных инициатив.</li>
+    <li><strong>«Затраты и окупаемость»</strong> — график по подразделениям: плановые/фактические
+      затраты и окупаемость, только по согласованным инициативам этого подразделения.</li>
+    <li><strong>Ресурсные таблицы</strong> — суммируются <strong>раздельно по каждому ресурсу</strong>,
+      с его собственной единицей измерения и ставкой (₽/ед.); разные ресурсы никогда не складываются
+      в одно число.</li>
+    <li><strong>Разбивка по подразделениям</strong> — количество инициатив и их статусный разрез по
+      всему портфелю, а рядом — денежные показатели, посчитанные только по согласованным инициативам
+      этого подразделения.</li>
+    <li><strong>Окупаемость портфеля</strong> считается как <strong>сумма окупаемости каждой отдельной
+      согласованной инициативы</strong> (не как отношение суммарных затрат к суммарной выгоде).</li>
+  </ul>
+
+  <h3>5. Напоминания о логировании времени</h3>
+  <p>Раз в неделю AI-чемпионам автоматически приходит напоминание залогировать фактическое время по их
+  инициативам.</p>
+  <ul>
+    <li><strong>Кому приходит.</strong> Только AI-чемпионам, и только если есть что логировать: нужна
+      хотя бы одна <strong>согласованная</strong> инициатива с плановыми человеко-часами, ещё не
+      покрытыми фактическими записями.</li>
+    <li><strong>Периодичность и день недели.</strong> Проверка идёт в фоне раз в час; фактическая
+      отправка — не чаще раза в календарный день и только в настроенный день недели. По умолчанию —
+      четверг, день задаётся переменной окружения <code>REMINDER_WEEKDAY</code>: имя дня недели
+      (<code>monday</code>…<code>sunday</code>) или число 0–6, где 0 — понедельник.</li>
+    <li><strong>Текст напоминания</strong> перечисляет конкретные инициативы (до трёх по названию,
+      дальше «и ещё N»), по которым остались нелогированные часы.</li>
+    <li><strong>Где видно.</strong> Раздел «Уведомления», открывается по клику на 🔔 в шапке, вместе со
+      всеми остальными уведомлениями сотрудника.</li>
+  </ul>
+
+  <div class="modal-actions">
+    <button class="secondary-btn" onclick="closeModal()">Закрыть</button>
+  </div>
+`;
+
+document.getElementById("about-btn").addEventListener("click", () => openModal(ABOUT_PRODUCT_HTML));
+
 function selectOptions(items, valueKey, labelKey, selected) {
   return items
     .map(
@@ -151,7 +459,9 @@ function statusInfo(ini) {
   if (ini.is_approved) return { label: "Согласовано", color: "green" };
   if (ini.latest_status === "revision") return { label: "На пересмотре", color: "yellow" };
   if (ini.latest_status === "rejected") return { label: "Отклонено", color: "red" };
-  return { label: "Ожидает согласования", color: "blue" };
+  if (ini.approval_stage === "teamlead") return { label: "Ожидает согласования TeamLead", color: "blue" };
+  if (ini.approval_stage === "top") return { label: "Ожидает согласования топ-менеджмента", color: "blue" };
+  return { label: "Ожидает согласования руководителя", color: "blue" };
 }
 
 function statusBadge(ini) {
@@ -193,6 +503,7 @@ function saveSession() {
       employeeId: state.employeeId,
       fullName: state.fullName,
       role: state.role,
+      specialization: state.specialization,
       departmentId: state.departmentId,
       departmentName: state.departmentName,
     })
@@ -228,7 +539,7 @@ function clearSession() {
     select.innerHTML = employees
       .map(
         (e) =>
-          `<option value="${e.id}">${esc(e.full_name)} — ${esc(ROLE_LABELS[e.role] || e.role)}${e.department_name ? ", " + esc(e.department_name) : ""}</option>`
+          `<option value="${e.id}">${esc(e.full_name)} — ${esc(roleLabel(e.role, e.specialization))}${e.department_name ? ", " + esc(e.department_name) : ""}</option>`
       )
       .join("");
     document.getElementById("employee-continue").addEventListener("click", () => {
@@ -238,6 +549,7 @@ function clearSession() {
       state.employeeId = emp.id;
       state.fullName = emp.full_name;
       state.role = emp.role;
+      state.specialization = emp.specialization;
       state.departmentId = emp.department_id;
       state.departmentName = emp.department_name;
       saveSession();
@@ -251,8 +563,16 @@ function clearSession() {
 /* ===================== App shell ===================== */
 
 const TAB_DEFS = {
-  champion: [{ id: "my", label: "Мои инициативы", render: renderChampionInitiatives }],
+  champion: [
+    { id: "my", label: "Мои инициативы", render: renderChampionInitiatives },
+    { id: "reports", label: "Отчёты", render: renderReportsTab },
+  ],
   head: [
+    { id: "pending", label: "Требуют согласования", render: renderHeadPending },
+    { id: "approved", label: "Согласованные", render: renderHeadApproved },
+    { id: "reports", label: "Отчёты", render: renderReportsTab },
+  ],
+  teamlead: [
     { id: "pending", label: "Требуют согласования", render: renderHeadPending },
     { id: "approved", label: "Согласованные", render: renderHeadApproved },
   ],
@@ -260,10 +580,14 @@ const TAB_DEFS = {
     { id: "all", label: "Все инициативы", render: renderPmInitiatives },
     { id: "rates", label: "Ресурсы и ставки", render: renderResourceRatesTab },
     { id: "staff", label: "Штат", render: renderStaffTab },
+    { id: "portfolio", label: "Портфель", render: renderTopDashboard },
+    { id: "reports", label: "Отчёты", render: renderReportsTab },
   ],
   top: [
+    { id: "pending", label: "Требуют согласования", render: renderTopPending },
     { id: "portfolio", label: "Портфель", render: renderTopDashboard },
     { id: "all", label: "Все инициативы", render: renderTopInitiatives },
+    { id: "reports", label: "Отчёты", render: renderReportsTab },
   ],
 };
 
@@ -272,7 +596,7 @@ async function startApp() {
   document.getElementById("app-screen").classList.remove("hidden");
   document.getElementById("who-name").textContent = state.fullName || "";
   document.getElementById("who-role").textContent =
-    (ROLE_LABELS[state.role] || state.role) + (state.departmentName ? ` · ${state.departmentName}` : "");
+    roleLabel(state.role, state.specialization) + (state.departmentName ? ` · ${state.departmentName}` : "");
 
   try {
     await loadReferenceCaches();
@@ -483,12 +807,16 @@ function renderInitiativesView(container, config) {
   const applyBtn = panel.querySelector("#f-apply");
   if (applyBtn) {
     applyBtn.addEventListener("click", () => {
+      // Only set a filter key when its dropdown actually exists in this view —
+      // otherwise `{...fixedParams, ...filters}` below would overwrite a fixed
+      // param (e.g. the champion's own id) with `undefined` and drop it from
+      // the request entirely.
       const fd = panel.querySelector("#f-department");
       const fc = panel.querySelector("#f-champion");
       const fa = panel.querySelector("#f-approved");
-      filters.department_id = fd ? fd.value : undefined;
-      filters.champion_id = fc ? fc.value : undefined;
-      filters.is_approved = fa ? fa.value : undefined;
+      if (fd) filters.department_id = fd.value;
+      if (fc) filters.champion_id = fc.value;
+      if (fa) filters.is_approved = fa.value;
       load();
     });
   }
@@ -524,7 +852,6 @@ function humanResourceRows(list) {
       return `<tr>
         <td>${esc(r.resource_name)}</td>
         <td>${fmtNum(r.quantity)}</td>
-        <td>${esc(r.unit)}</td>
         <td>${fmtNum(r.fact_quantity)}${overrun ? ` <span class="overrun-warning">⚠️ Плановое значение превышено</span>` : ""}</td>
       </tr>`;
     })
@@ -576,7 +903,7 @@ function renderInitiativeDetail(ini, config) {
   const approvalsRows = ini.approvals
     .map(
       (a) => `<div class="comment">
-        <div class="meta">${fmtDateTime(a.created_at)} · ${esc(a.actor_name)} · <strong>${esc(approvalStatusLabel(a.status))}</strong></div>
+        <div class="meta">${fmtDateTime(a.created_at)} · ${esc(a.actor_name)} (${esc(roleLabel(a.actor_role, a.actor_specialization))}) · <strong>${esc(approvalStatusLabel(a.status))}</strong></div>
         ${a.comment ? `<div class="text">${esc(a.comment)}</div>` : ""}
       </div>`
     )
@@ -591,12 +918,31 @@ function renderInitiativeDetail(ini, config) {
     )
     .join("");
 
+  const attachmentsRows = ini.attachments
+    .map(
+      (a) => `<div class="comment" data-attachment-id="${a.id}">
+        <div class="meta">${esc(a.filename)} · ${fmtFileSize(a.size)} · загрузил(а) ${esc(a.uploader_name)}, ${fmtDateTime(a.created_at)}</div>
+        <button type="button" class="secondary-btn small-btn attachment-download-btn" data-id="${a.id}" data-name="${esc(a.filename)}">Скачать</button>
+      </div>`
+    )
+    .join("");
+
   openModal(`
     <div style="display:flex; justify-content:space-between; align-items:flex-start;">
       <h2 style="margin-top:0;">${esc(ini.title)}</h2>
       <button class="link-btn" onclick="closeModal()">✕</button>
     </div>
     ${statusBadge(ini)}
+    ${(() => {
+      if (ini.approval_stage !== "teamlead") return "";
+      const fmt = (p) => esc(p.employee_name) + (p.resource_name ? ` (${esc(p.resource_name)})` : "");
+      const waiting = ini.pending_approvers.filter((p) => p.status === "pending");
+      const approved = ini.pending_approvers.filter((p) => p.status === "approved");
+      const lines = [];
+      if (!ini.is_approved && waiting.length) lines.push(`<p class="muted">Ожидает решения: ${waiting.map(fmt).join(", ")}</p>`);
+      if (approved.length) lines.push(`<p class="muted">Уже согласовали: ${approved.map(fmt).join(", ")}</p>`);
+      return lines.join("");
+    })()}
 
     <div class="form-grid" style="margin-top:16px;">
       <div><label>Подразделение</label>${esc(ini.department_name)}</div>
@@ -608,11 +954,11 @@ function renderInitiativeDetail(ini, config) {
     </div>
 
     <div style="display:flex; justify-content:space-between; align-items:center;">
-      <h3 style="margin-bottom:0;">Плановые человеческие ресурсы</h3>
+      <h3 style="margin-bottom:0;">Человеко-часы</h3>
       ${canLogTime ? `<button type="button" class="secondary-btn small-btn" id="btn-log-time">Логирование времени</button>` : ""}
     </div>
-    <table><thead><tr><th>Специализация</th><th>Количество</th><th>Единица</th><th>Фактические затраты</th></tr></thead>
-      <tbody>${humanResourceRows(human) || `<tr><td colspan="4" class="muted">Не заданы</td></tr>`}</tbody>
+    <table><thead><tr><th>Специализация</th><th>Плановые затраты</th><th>Фактические затраты</th></tr></thead>
+      <tbody>${humanResourceRows(human) || `<tr><td colspan="3" class="muted">Не заданы</td></tr>`}</tbody>
     </table>
     ${canLogTime ? `
       <form id="time-log-form" class="time-log-form hidden">
@@ -642,7 +988,7 @@ function renderInitiativeDetail(ini, config) {
     </table>
 
     ${canAct ? `
-      <h3>Решение руководителя</h3>
+      <h3>${{ teamlead: "Решение TeamLead", top: "Решение топ-менеджмента" }[state.role] || "Решение руководителя"}</h3>
       <textarea id="approval-comment" placeholder="Комментарий (обязателен для отклонения и пересмотра)"></textarea>
       <div class="modal-actions" style="justify-content:flex-start;">
         <button class="success-btn" id="btn-approve">Согласовать</button>
@@ -663,6 +1009,17 @@ function renderInitiativeDetail(ini, config) {
          <textarea id="comment-text" placeholder="Ваш комментарий..." required></textarea>
          <div class="modal-actions" style="justify-content:flex-start; margin-top:8px;">
            <button type="submit" class="secondary-btn">Добавить комментарий</button>
+         </div>
+       </form>`
+    )}
+
+    ${collapsibleSection(
+      "attachments", "Прикреплённые файлы", ini.attachments.length,
+      `${attachmentsRows || `<p class="muted">Файлов пока нет.</p>`}
+       <form id="attachment-form" style="margin-top:10px;">
+         <input type="file" id="attachment-file" required>
+         <div class="modal-actions" style="justify-content:flex-start; margin-top:8px;">
+           <button type="submit" class="secondary-btn">Прикрепить файл</button>
          </div>
        </form>`
     )}
@@ -695,6 +1052,41 @@ function renderInitiativeDetail(ini, config) {
     }
   });
 
+  document.querySelectorAll(".attachment-download-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Скачивание...";
+      try {
+        await downloadFile(`/initiatives/${ini.id}/attachments/${id}/download`, null, btn.dataset.name);
+      } catch (e2) {
+        toast(e2.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+  });
+
+  const attachmentForm = document.getElementById("attachment-form");
+  attachmentForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fileInput = document.getElementById("attachment-file");
+    const file = fileInput.files[0];
+    if (!file) {
+      toast("Выберите файл", true);
+      return;
+    }
+    try {
+      await uploadFile(`/initiatives/${ini.id}/attachments`, file);
+      toast("Файл прикреплён");
+      openInitiativeDetail(ini.id, config);
+    } catch (e2) {
+      toast(e2.message, true);
+    }
+  });
+
   if (canLogTime) {
     const timeLogForm = document.getElementById("time-log-form");
     document.getElementById("btn-log-time").addEventListener("click", () => {
@@ -710,6 +1102,22 @@ function renderInitiativeDetail(ini, config) {
       if (!resource_id || !quantity || quantity <= 0) {
         toast("Укажите специализацию и количество часов больше нуля", true);
         return;
+      }
+      // Fact hours may never exceed the planned hours for that specialization —
+      // check locally first so the champion gets instant feedback; the backend
+      // enforces the same rule regardless.
+      const planned = ini.resources_planned.find((r) => r.resource_id === resource_id);
+      if (planned) {
+        const remaining = planned.quantity - planned.fact_quantity;
+        if (quantity > remaining) {
+          toast(
+            `Нельзя записать ${fmtNum(quantity)} ч. по специализации «${planned.resource_name}»: ` +
+              `план — ${fmtNum(planned.quantity)} ч., уже записано — ${fmtNum(planned.fact_quantity)} ч., ` +
+              `остаётся не более ${fmtNum(Math.max(remaining, 0))} ч.`,
+            true
+          );
+          return;
+        }
       }
       try {
         await api(`/initiatives/${ini.id}/cost_logs`, { method: "POST", body: { resource_id, quantity } });
@@ -929,7 +1337,7 @@ function renderPmInitiatives(container) {
   });
 }
 
-function rateTableRows(list) {
+function rateTableRows(list, showTeamLead) {
   return list
     .map(
       (r) => `<tr data-id="${r.id}">
@@ -938,6 +1346,7 @@ function rateTableRows(list) {
         <td>
           <input type="number" min="0" step="0.01" class="rate-input" value="${r.rate}" style="max-width:160px;">
         </td>
+        ${showTeamLead ? `<td>${esc(r.team_lead_name || "—")}</td>` : ""}
         <td><button type="button" class="secondary-btn small-btn rate-save-btn">Сохранить</button></td>
       </tr>`
     )
@@ -946,19 +1355,23 @@ function rateTableRows(list) {
 
 async function renderResourceRatesTab(container) {
   container.innerHTML = "";
-  const resources = await api("/resources");
+  const [resources, employees] = await Promise.all([api("/resources"), api("/employees")]);
   const human = resources.filter((r) => r.category === "human");
   const tech = resources.filter((r) => r.category === "tech");
+  const teamLeads = employees.filter((e) => e.role === "teamlead");
 
   const panel = el(`
     <div class="panel">
       <h2>Ресурсы и ставки</h2>
       <p class="muted">Стоимость одной единицы ресурса — используется для оценки затрат и выгоды инициатив в деньгах.</p>
 
-      <h3>Человеческие ресурсы</h3>
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="margin-bottom:0;">Человеческие ресурсы</h3>
+        <button type="button" class="primary-btn" id="add-human-resource-btn">+ Новая специализация</button>
+      </div>
       <table>
-        <thead><tr><th>Специализация</th><th>Единица</th><th>Ставка, ₽ за единицу</th><th></th></tr></thead>
-        <tbody id="rates-human">${rateTableRows(human) || `<tr><td colspan="4" class="muted">Нет данных</td></tr>`}</tbody>
+        <thead><tr><th>Специализация</th><th>Единица</th><th>Ставка, ₽ за единицу</th><th>TeamLead</th><th></th></tr></thead>
+        <tbody id="rates-human">${rateTableRows(human, true) || `<tr><td colspan="5" class="muted">Нет данных</td></tr>`}</tbody>
       </table>
 
       <h3>Технические ресурсы</h3>
@@ -969,6 +1382,11 @@ async function renderResourceRatesTab(container) {
     </div>
   `);
   container.appendChild(panel);
+
+  async function refresh() {
+    await loadReferenceCaches();
+    renderResourceRatesTab(container);
+  }
 
   panel.querySelectorAll(".rate-save-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -988,6 +1406,62 @@ async function renderResourceRatesTab(container) {
         toast(e.message, true);
       }
     });
+  });
+
+  const addBtn = panel.querySelector("#add-human-resource-btn");
+  if (addBtn) addBtn.addEventListener("click", () => openHumanResourceForm(teamLeads, refresh));
+}
+
+function openHumanResourceForm(teamLeads, onSaved) {
+  openModal(`
+    <h2 style="margin-top:0;">Новая специализация</h2>
+    <form id="human-resource-form">
+      <div class="form-grid">
+        <div class="full"><label>Название специализации</label><input name="name" required></div>
+        <div><label>Единица</label><input name="unit" value="чел-часы"></div>
+        <div><label>Ставка, ₽ за единицу</label><input type="number" min="0" step="0.01" name="rate" value="0"></div>
+        <div class="full">
+          <label>TeamLead</label>
+          <select name="team_lead_id" required>
+            <option value="">— выберите сотрудника с ролью TeamLead —</option>
+            ${selectOptions(teamLeads, "id", "full_name")}
+          </select>
+          ${
+            teamLeads.length === 0
+              ? `<p class="muted">Нет ни одного сотрудника с ролью TeamLead. Сначала добавьте его в разделе «Штат».</p>`
+              : ""
+          }
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary-btn" onclick="closeModal()">Отмена</button>
+        <button type="submit" class="primary-btn">Создать</button>
+      </div>
+    </form>
+  `);
+
+  document.getElementById("human-resource-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    if (!fd.get("team_lead_id")) {
+      toast("Для новой специализации необходимо указать TeamLead", true);
+      return;
+    }
+    const payload = {
+      name: fd.get("name"),
+      category: "human",
+      unit: fd.get("unit") || "",
+      rate: parseFloat(fd.get("rate")) || 0,
+      team_lead_id: Number(fd.get("team_lead_id")),
+    };
+    try {
+      await api("/resources", { method: "POST", body: payload });
+      toast("Специализация добавлена");
+      closeModal();
+      onSaved();
+    } catch (err) {
+      toast(err.message, true);
+    }
   });
 }
 
@@ -1043,7 +1517,7 @@ async function renderStaffTab(container) {
             .map(
               (e) => `<tr>
                 <td>${esc(e.full_name)}</td>
-                <td>${esc(ROLE_LABELS[e.role] || e.role)}</td>
+                <td>${esc(roleLabel(e.role, e.specialization))}</td>
                 <td>${esc(e.department_name || "—")}</td>
                 <td>${esc(e.position || "—")}</td>
                 <td>${esc(e.email || "—")}</td>
@@ -1111,6 +1585,7 @@ function openEmployeeForm(departments, onSaved) {
             <option value="head">Руководитель подразделения</option>
             <option value="pm">PM</option>
             <option value="top">Топ-менеджмент</option>
+            <option value="teamlead">TeamLead</option>
           </select>
         </div>
         <div id="employee-department-field">
@@ -1253,6 +1728,19 @@ function openDepartmentDetail(dept, employees, onSaved) {
 
 /* ===================== Top tabs ===================== */
 
+function renderTopPending(container) {
+  renderInitiativesView(container, {
+    fixedParams: { awaiting_me: true },
+    showFilters: [],
+    showDepartment: true,
+    showChampion: true,
+    canCreate: false,
+    canEdit: () => false,
+    canDelete: () => false,
+    canAct: () => true,
+  });
+}
+
 function renderTopInitiatives(container) {
   renderInitiativesView(container, {
     fixedParams: {},
@@ -1291,6 +1779,14 @@ async function renderTopDashboard(container) {
     </div>
   `));
 
+  const totalBenefitPanel = el(`
+    <div class="panel">
+      <h2>Общая ожидаемая выгода портфеля (экономия в месяц)</h2>
+      <div style="font-size:2em; font-weight:700;">${fmtNum(data.total_benefit_money)} ₽</div>
+    </div>
+  `);
+  container.appendChild(totalBenefitPanel);
+
   // Money view: quantity × the resource rate set by PM in "Ресурсы и ставки" —
   // resources with no rate configured simply contribute 0. The payback label
   // under each department's bars is the sum of its own initiatives' payback
@@ -1313,7 +1809,8 @@ async function renderTopDashboard(container) {
     colorA: "#93c5fd",
     colorB: "#1d4ed8",
     valueFormatter: (v) => fmtNum(v),
-    subLabels: data.by_department.map((d) => `Окупаемость: ${paybackText(d.payback_months_sum)}`),
+    subLabels: data.by_department.map((d) => paybackText(d.payback_months_sum)),
+    subLabelPrefix: "Окупаемость",
   });
 
   // Human-hours × rate = ₽ — shown as cost so it's directly comparable across
@@ -1352,10 +1849,10 @@ async function renderTopDashboard(container) {
     <div class="panel">
       <h2>Ожидаемая выгода портфеля (экономия в месяц)</h2>
       <table>
-        <thead><tr><th>Ресурс</th><th>Категория</th><th>Количество / мес</th><th>Единица</th></tr></thead>
+        <thead><tr><th>Ресурс</th><th>Категория</th><th>Количество / мес</th><th>Единица</th><th>Руб / месяц</th></tr></thead>
         <tbody>${data.benefits_total
-          .map((r) => `<tr><td>${esc(r.resource)}</td><td>${r.category === "human" ? "Человеческий" : "Технический"}</td><td>${fmtNum(r.total)}</td><td>${esc(r.unit)}</td></tr>`)
-          .join("") || `<tr><td colspan="4" class="muted">Нет данных</td></tr>`}</tbody>
+          .map((r) => `<tr><td>${esc(r.resource)}</td><td>${r.category === "human" ? "Человеческий" : "Технический"}</td><td>${fmtNum(r.total)}</td><td>${esc(r.unit)}</td><td>${fmtNum(r.total_money)}</td></tr>`)
+          .join("") || `<tr><td colspan="5" class="muted">Нет данных</td></tr>`}</tbody>
       </table>
     </div>
   `);
@@ -1427,10 +1924,14 @@ function setupColumnChartAxes(ctx, W, H, basePadding, maxValue, valueFormatter) 
   return { plotW, plotH, niceMax, padding };
 }
 
-function drawCategoryLabels(ctx, categories, padding, plotW, plotH, slotW, subLabels) {
+const SUB_LABEL_FONT = "bold 12px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+const SUB_LABEL_COLOR = "#2563eb";
+
+function drawCategoryLabels(ctx, categories, padding, plotW, plotH, slotW, subLabels, subLabelPrefix) {
   ctx.fillStyle = CHART_AXIS_TEXT;
   ctx.font = CHART_FONT;
   const rotate = categories.some((c) => c.length > 10);
+  const subLabelOffset = rotate ? 60 : 30;
   categories.forEach((cat, idx) => {
     const cx = padding.left + slotW * idx + slotW / 2;
     const cy = padding.top + plotH + 8;
@@ -1452,12 +1953,24 @@ function drawCategoryLabels(ctx, categories, padding, plotW, plotH, slotW, subLa
       ctx.save();
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
-      ctx.font = "11px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
-      ctx.fillStyle = CHART_AXIS_TEXT;
-      ctx.fillText(subLabels[idx], cx, cy + (rotate ? 60 : 30));
+      ctx.font = SUB_LABEL_FONT;
+      ctx.fillStyle = SUB_LABEL_COLOR;
+      ctx.fillText(subLabels[idx], cx, cy + subLabelOffset);
       ctx.restore();
     }
   });
+
+  // The row label ("Окупаемость") is drawn once on the left instead of being
+  // repeated in front of every value under the bars.
+  if (subLabels && subLabelPrefix) {
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = SUB_LABEL_FONT;
+    ctx.fillStyle = SUB_LABEL_COLOR;
+    ctx.fillText(subLabelPrefix, 4, padding.top + plotH + 8 + subLabelOffset);
+    ctx.restore();
+  }
 }
 
 function drawColumnChart(canvas, { categories, values, color, valueFormatter }) {
@@ -1490,7 +2003,7 @@ function drawColumnChart(canvas, { categories, values, color, valueFormatter }) 
   drawCategoryLabels(ctx, categories, padding, plotW, plotH, slotW);
 }
 
-function drawGroupedColumnChart(canvas, { categories, seriesA, seriesB, colorA, colorB, valueFormatter, subLabels }) {
+function drawGroupedColumnChart(canvas, { categories, seriesA, seriesB, colorA, colorB, valueFormatter, subLabels, subLabelPrefix }) {
   const ctx = canvas.getContext("2d");
   const W = canvas.width;
   const H = canvas.height;
@@ -1522,5 +2035,83 @@ function drawGroupedColumnChart(canvas, { categories, seriesA, seriesB, colorA, 
     });
   });
 
-  drawCategoryLabels(ctx, categories, padding, plotW, plotH, slotW, subLabels);
+  drawCategoryLabels(ctx, categories, padding, plotW, plotH, slotW, subLabels, subLabelPrefix);
+}
+
+/* ===================== Reports ===================== */
+
+function renderReportsTab(container) {
+  container.innerHTML = "";
+  const showDepartment = state.role === "pm" || state.role === "top";
+
+  const scopeNote = {
+    champion: "Отчёт строится только по вашим инициативам.",
+    head: "Отчёт строится по инициативам AI-чемпионов вашего подразделения.",
+    pm: "Отчёт строится по всем инициативам портала.",
+    top: "Отчёт строится по всем инициативам портала.",
+  }[state.role] || "";
+
+  const panel = el(`
+    <div class="panel">
+      <h2>Отчёты</h2>
+      <p class="muted">${esc(scopeNote)} Выгрузка — файл с одной строкой на инициативу и итогами внизу.</p>
+
+      <div class="form-grid">
+        <div><label>Дата начала (от)</label><input type="date" id="report-date-from"></div>
+        <div><label>Дата окончания (до)</label><input type="date" id="report-date-to"></div>
+        <div>
+          <label>Статус инициативы</label>
+          <select id="report-status">
+            <option value="">Все</option>
+            ${Object.entries(REPORT_STATUS_LABELS)
+              .map(([value, label]) => `<option value="${value}">${esc(label)}</option>`)
+              .join("")}
+          </select>
+        </div>
+        ${
+          showDepartment
+            ? `<div><label>Подразделение</label>
+                <select id="report-department"><option value="">Все</option>${selectOptions(state.ref.departments, "id", "name")}</select>
+              </div>`
+            : ""
+        }
+        <div>
+          <label>Формат файла</label>
+          <select id="report-format">
+            <option value="xlsx">Excel (.xlsx)</option>
+            <option value="csv">CSV (.csv)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="modal-actions" style="justify-content:flex-start; margin-top:16px;">
+        <button type="button" class="primary-btn" id="report-download-btn">Скачать отчёт</button>
+      </div>
+    </div>
+  `);
+  container.appendChild(panel);
+
+  const btn = panel.querySelector("#report-download-btn");
+  btn.addEventListener("click", async () => {
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Формирование отчёта...";
+    try {
+      const params = {
+        date_from: panel.querySelector("#report-date-from").value || undefined,
+        date_to: panel.querySelector("#report-date-to").value || undefined,
+        status: panel.querySelector("#report-status").value || undefined,
+      };
+      const deptEl = panel.querySelector("#report-department");
+      if (deptEl) params.department_id = deptEl.value || undefined;
+      const format = panel.querySelector("#report-format").value;
+      await downloadFile(`/reports/initiatives.${format}`, params, `report.${format}`);
+      toast("Отчёт сформирован");
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
 }

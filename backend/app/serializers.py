@@ -35,6 +35,7 @@ def initiative_list_item(ini: models.Initiative) -> dict:
         "start_date": ini.start_date,
         "end_date": ini.end_date,
         "is_approved": ini.is_approved,
+        "approval_stage": ini.approval_stage,
         "latest_status": _latest_status(ini),
         "payback_months": _payback_months(ini),
         "created_at": ini.created_at,
@@ -83,10 +84,36 @@ def _approval_dict(a: models.Approval) -> dict:
         "initiative_id": a.initiative_id,
         "actor_id": a.actor_id,
         "actor_name": a.actor.full_name if a.actor else None,
+        "actor_role": a.actor.role if a.actor else None,
+        "actor_specialization": a.actor.led_resource.name if a.actor and a.actor.led_resource else None,
         "status": a.status,
         "comment": a.comment,
         "created_at": a.created_at,
         "updated_at": a.updated_at,
+    }
+
+
+def _pending_approver_dict(p: models.PendingApprover) -> dict:
+    return {
+        "id": p.id,
+        "employee_id": p.employee_id,
+        "employee_name": p.employee.full_name if p.employee else None,
+        "resource_id": p.resource_id,
+        "resource_name": p.resource.name if p.resource else None,
+        "status": p.status,
+    }
+
+
+def _attachment_dict(a: models.Attachment) -> dict:
+    return {
+        "id": a.id,
+        "initiative_id": a.initiative_id,
+        "uploader_id": a.uploader_id,
+        "uploader_name": a.uploader.full_name if a.uploader else None,
+        "filename": a.filename,
+        "content_type": a.content_type,
+        "size": a.size,
+        "created_at": a.created_at,
     }
 
 
@@ -124,5 +151,9 @@ def initiative_detail(ini: models.Initiative) -> dict:
     )
     base["cost_logs"] = sorted(
         [_cost_log_dict(c) for c in ini.cost_logs], key=lambda c: c["created_at"], reverse=True
+    )
+    base["pending_approvers"] = [_pending_approver_dict(p) for p in ini.pending_approvers]
+    base["attachments"] = sorted(
+        [_attachment_dict(a) for a in ini.attachments], key=lambda a: a["created_at"], reverse=True
     )
     return base

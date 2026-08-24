@@ -26,6 +26,7 @@ class EmployeeRead(BaseModel):
     department_name: Optional[str] = None
     email: str
     role: str
+    specialization: Optional[str] = None
 
 
 class EmployeeCreate(BaseModel):
@@ -51,10 +52,21 @@ class ResourceRead(BaseModel):
     category: str
     unit: str
     rate: float = 0
+    team_lead_id: Optional[int] = None
+    team_lead_name: Optional[str] = None
+
+
+class ResourceCreate(BaseModel):
+    name: str
+    category: str
+    unit: Optional[str] = ""
+    rate: Optional[float] = 0
+    team_lead_id: Optional[int] = None
 
 
 class ResourceRateUpdate(BaseModel):
-    rate: float
+    rate: Optional[float] = None
+    team_lead_id: Optional[int] = None
 
 
 # ---------- Resource entries / benefits ----------
@@ -125,6 +137,7 @@ class InitiativeListItem(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     is_approved: bool
+    approval_stage: str
     latest_status: Optional[str] = None
     payback_months: Optional[float] = None
     created_at: datetime
@@ -142,6 +155,8 @@ class ApprovalRead(BaseModel):
     initiative_id: int
     actor_id: int
     actor_name: Optional[str] = None
+    actor_role: Optional[str] = None
+    actor_specialization: Optional[str] = None
     status: str
     comment: Optional[str] = ""
     created_at: datetime
@@ -180,6 +195,28 @@ class CostLogRead(BaseModel):
     created_at: datetime
 
 
+class PendingApproverRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    employee_id: int
+    employee_name: Optional[str] = None
+    resource_id: Optional[int] = None
+    resource_name: Optional[str] = None
+    status: str
+
+
+class AttachmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    initiative_id: int
+    uploader_id: int
+    uploader_name: Optional[str] = None
+    filename: str
+    content_type: str
+    size: int
+    created_at: datetime
+
+
 class InitiativeDetail(InitiativeListItem):
     description: Optional[str] = ""
     resources_planned: List[ResourceEntryRead] = []
@@ -187,6 +224,8 @@ class InitiativeDetail(InitiativeListItem):
     comments: List[CommentRead] = []
     approvals: List[ApprovalRead] = []
     cost_logs: List[CostLogRead] = []
+    pending_approvers: List[PendingApproverRead] = []
+    attachments: List[AttachmentRead] = []
 
 
 class ApprovalAction(BaseModel):
@@ -201,5 +240,6 @@ class NotificationRead(BaseModel):
     id: int
     recipient_id: int
     message: str
+    type: str = "info"
     is_read: bool
     created_at: datetime

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -10,15 +12,14 @@ router = APIRouter()
 
 @router.get("/notifications", response_model=list[schemas.NotificationRead])
 def list_notifications(
+    type: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
     employee: models.Employee = Depends(require_employee),
 ):
-    return (
-        db.query(models.Notification)
-        .filter(models.Notification.recipient_id == employee.id)
-        .order_by(models.Notification.created_at.desc())
-        .all()
-    )
+    q = db.query(models.Notification).filter(models.Notification.recipient_id == employee.id)
+    if type:
+        q = q.filter(models.Notification.type == type)
+    return q.order_by(models.Notification.created_at.desc()).all()
 
 
 @router.post("/notifications/{notification_id}/read", response_model=schemas.NotificationRead)
